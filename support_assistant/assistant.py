@@ -1,100 +1,127 @@
+import os
+import glob
+from typing import TypedDict, List, Optional
+from pydantic import BaseModel, Field
+from fastapi import FastAPI
+import uvicorn
+import chromadb
+from sentence_transformers import SentenceTransformer
+from langgraph.graph import StateGraph, END
 
-import sqlite3
-import pandas as pd
-from textblob import TextBlob
+# --- Pydantic Schema ---
+class QueryRequest(BaseModel):
+    query: str
 
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[str] = Field(default_factory=list)
+    confidence: float
 
-# --- 1. Tool Implementations ---
-def check_inventory(product_name: str) -> str:
-    """Queries the SQLite database created in Module 1 to check book inventory."""
-    conn = sqlite3.connect("data_pipeline/zepto_catalog.db")
-    cursor = conn.cursor()
+# --- ChromaDB Setup ---
+DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
-    cursor.execute(
-        "SELECT title, price_inr, in_stock FROM books WHERE title LIKE ?",
-        (f"%{product_name}%",),
-    )
-    results = cursor.fetchall()
-    conn.close()
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    if not results:
-        return f"No products found matching '{product_name}'."
+class LocalEmbeddingFunction:
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        return embedding_model.encode(input).tolist()
 
-    res_str = ""
-    for title, price, stock in results:
-        status = "In Stock" if stock == 1 else "Out of Stock"
-        res_str += f"- {title}: ₹{price} ({status})\n"
-    return res_str.strip()
+chroma_client = chromadb.PersistentClient(path=DB_DIR)
+collection = chroma_client.get_or_create_collection(
+    name="zepto_policies",
+    embedding_function=LocalEmbeddingFunction()
+)
 
+def init_vector_store():
+    if collection.count() == 0 and os.path.exists(DOCS_DIR):
+        doc_files = sorted(glob.glob(os.path.join(DOCS_DIR, "doc_*.txt")))
+        documents, ids, metadatas = [], [], []
+        for file_path in doc_files:
+            doc_id = os.path.basename(file_path).replace(".txt", "")
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+            documents.append(text)
+            ids.append(doc_id)
+            metadatas.append({"source": doc_id})
+        if documents:
+            collection.add(documents=documents, ids=ids, metadatas=metadatas)
 
-def calculate_discount(price: float, discount_pct: float) -> float:
-    """Calculates final price after applying discount percentage."""
-    discount_amount = price * (discount_pct / 100.0)
-    return round(price - discount_amount, 2)
+init_vector_store()
 
+# --- LangGraph Setup ---
+class GraphState(TypedDict):
+    query: str
+    intent: Optional[str]
+    retrieved_docs: Optional[List[str]]
+    retrieved_ids: Optional[List[str]]
+    final_response: Optional[QueryResponse]
 
-# --- 2. Sentiment Analysis System ---
-def analyze_sentiment(user_message: str) -> dict:
-    """Analyzes customer message sentiment to adjust tone and escalation status."""
-    analysis = TextBlob(user_message)
-    polarity = analysis.sentiment.polarity
-
-    if polarity < -0.2:
-        sentiment = "Frustrated"
-        tone_instruction = "Apologetic, empathetic, and highly priority-focused."
-        escalate = True
-    elif polarity > 0.2:
-        sentiment = "Positive"
-        tone_instruction = "Warm, enthusiastic, and helpful."
-        escalate = False
+def classify_intent(state: GraphState) -> GraphState:
+    query = state["query"].lower()
+    keywords = ["delivery", "return", "refund", "membership", "tracking", "cancel", "gift card", "support hours"]
+    if any(kw in query for kw in keywords):
+        intent = "policy_question"
     else:
-        sentiment = "Neutral"
-        tone_instruction = "Professional, concise, and direct."
-        escalate = False
+        intent = "general_question"
+    return {**state, "intent": intent}
 
-    return {
-        "sentiment": sentiment,
-        "polarity_score": round(polarity, 2),
-        "tone_instruction": tone_instruction,
-        "escalate": escalate,
+def retrieve_and_answer(state: GraphState) -> GraphState:
+    query = state["query"]
+    results = collection.query(query_texts=[query], n_results=3)
+    retrieved_docs = results["documents"][0] if results["documents"] else []
+    retrieved_ids = results["ids"][0] if results["ids"] else []
+    
+    top_snippet = retrieved_docs[0][:200] if retrieved_docs else "No content retrieved."
+    canned_answer = f"Based on the retrieved context: {top_snippet}..."
+    
+    response = QueryResponse(
+        answer=canned_answer,
+        sources=retrieved_ids[:1],
+        confidence=1.0
+    )
+    return {**state, "retrieved_docs": retrieved_docs, "retrieved_ids": retrieved_ids, "final_response": response}
+
+def direct_answer(state: GraphState) -> GraphState:
+    response = QueryResponse(
+        answer="I can only answer questions about Zepto policies right now.",
+        sources=[],
+        confidence=1.0
+    )
+    return {**state, "final_response": response}
+
+def route_intent(state: GraphState) -> str:
+    return state["intent"]
+
+builder = StateGraph(GraphState)
+builder.add_node("classify_intent", classify_intent)
+builder.add_node("retrieve_and_answer", retrieve_and_answer)
+builder.add_node("direct_answer", direct_answer)
+
+builder.set_entry_point("classify_intent")
+builder.add_conditional_edges("classify_intent", route_intent, {
+    "policy_question": "retrieve_and_answer",
+    "general_question": "direct_answer"
+})
+builder.add_edge("retrieve_and_answer", END)
+builder.add_edge("direct_answer", END)
+
+graph = builder.compile()
+
+# --- FastAPI App ---
+app = FastAPI(title="Zepto Support Assistant")
+
+@app.post("/ask", response_model=QueryResponse)
+def ask_question(request: QueryRequest):
+    initial_state = {
+        "query": request.query,
+        "intent": None,
+        "retrieved_docs": None,
+        "retrieved_ids": None,
+        "final_response": None
     }
-
-
-# --- 3. Assistant Orchestration Demo ---
-def run_support_assistant(user_message: str, product_query: str = None, price: float = None, discount: float = None):
-    print("=" * 50)
-    print(f"User Message: '{user_message}'")
-
-    # Step A: Sentiment Analysis
-    sentiment_info = analyze_sentiment(user_message)
-    print(f"\n[Sentiment Analysis]")
-    print(f"Detected Sentiment: {sentiment_info['sentiment']} (Score: {sentiment_info['polarity_score']})")
-    print(f"Tone Strategy: {sentiment_info['tone_instruction']}")
-    print(f"Escalation Flag: {sentiment_info['escalate']}")
-
-    # Step B: Tool Execution
-    print(f"\n[Tool Execution]")
-    if product_query:
-        inv_result = check_inventory(product_query)
-        print(f"Inventory Check Tool Result:\n{inv_result}")
-
-    if price is not None and discount is not None:
-        disc_result = calculate_discount(price, discount)
-        print(f"Discount Tool Result: Original ₹{price} with {discount}% off -> Final: ₹{disc_result}")
-
-    print("=" * 50 + "\n")
-
+    result = graph.invoke(initial_state)
+    return result["final_response"]
 
 if __name__ == "__main__":
-    # Test Case 1: Neutral inquiry with inventory check
-    run_support_assistant(
-        user_message="Hello, do you have any books about Sapiens in stock?",
-        product_query="Sapiens"
-    )
-
-    # Test Case 2: Frustrated user with discount calculation
-    run_support_assistant(
-        user_message="My order is taking forever! Can I get a 15% discount on this 500 rupees book?",
-        price=500.0,
-        discount=15.0
-    )
+    uvicorn.run("assistant:app", host="0.0.0.0", port=7860, reload=True)-
