@@ -7,7 +7,9 @@ langgraph
 requests
 beautifulsoup4
 pandas
+numpy
 scikit-learn
+imbalanced-learn
 seaborn
 matplotlib
 joblib
