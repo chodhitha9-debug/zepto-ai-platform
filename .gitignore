@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+chroma_db/
+.venv/
+venv/
+env/
+.env
+*.db
+*.sqlite
+*.sqlite3
+.ipynb_checkpoints/
