@@ -17,8 +17,9 @@ from sklearn.metrics import (
     mean_squared_error,
     precision_score,
     recall_score,
-    r2_score,
     roc_auc_score,
+    roc_curve,
+    r2_score,
 )
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
@@ -94,7 +95,17 @@ def evaluate_classifier(name, pipeline, X_train, X_test, y_train, y_test):
     print("Confusion Matrix:")
     print(matrix)
 
-    return pipeline
+    return {
+        "name": name,
+        "pipeline": pipeline,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "roc_auc": auc,
+        "confusion_matrix": matrix,
+        "probabilities": probabilities,
+    }
 
 
 def run_modeling():
@@ -137,7 +148,7 @@ def run_modeling():
 
     print("\n--- Model Performance Metrics ---")
 
-    fitted_models = {}
+    baseline_results = []
 
     for name, model in models.items():
         pipeline = Pipeline(
@@ -147,7 +158,7 @@ def run_modeling():
             ]
         )
 
-        fitted_models[name] = evaluate_classifier(
+        result = evaluate_classifier(
             name,
             pipeline,
             X_train,
@@ -155,6 +166,67 @@ def run_modeling():
             y_train,
             y_test,
         )
+
+        baseline_results.append(result)
+
+    baseline_table = pd.DataFrame(
+        [
+            {
+                "Model": result["name"],
+                "Accuracy": result["accuracy"],
+                "Precision": result["precision"],
+                "Recall": result["recall"],
+                "F1": result["f1"],
+                "ROC_AUC": result["roc_auc"],
+            }
+            for result in baseline_results
+        ]
+    )
+
+    print("\n--- Baseline Model Comparison ---")
+    print(baseline_table.round(4).to_string(index=False))
+
+    baseline_table.to_csv(
+        "analytics/classifier_comparison.csv",
+        index=False,
+    )
+
+    plt.figure(figsize=(10, 7))
+
+    for result in baseline_results:
+        false_positive_rate, true_positive_rate, _ = roc_curve(
+            y_test,
+            result["probabilities"],
+        )
+
+        plt.plot(
+            false_positive_rate,
+            true_positive_rate,
+            label=f'{result["name"]} (AUC={result["roc_auc"]:.3f})',
+        )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+    )
+
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves for Classification Models")
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(
+        "analytics/roc_curves.png",
+        dpi=200,
+    )
+
+    plt.close()
+
+    print(
+        "\nROC curve saved to analytics/roc_curves.png"
+    )
 
     decision_tree_pipeline = Pipeline(
         [
@@ -198,15 +270,16 @@ def run_modeling():
 
     plt.title("Decision Tree Classifier")
     plt.tight_layout()
+
     plt.savefig(
         "analytics/decision_tree.png",
         dpi=200,
     )
+
     plt.close()
 
     print(
-        "\nDecision tree saved to "
-        "analytics/decision_tree.png"
+        "\nDecision tree saved to analytics/decision_tree.png"
     )
 
     print("\n--- Class Weight Balanced Comparison ---")
@@ -229,6 +302,8 @@ def run_modeling():
         ),
     }
 
+    balanced_results = []
+
     for name, model in balanced_models.items():
         pipeline = Pipeline(
             [
@@ -237,7 +312,7 @@ def run_modeling():
             ]
         )
 
-        evaluate_classifier(
+        result = evaluate_classifier(
             name,
             pipeline,
             X_train,
@@ -245,6 +320,8 @@ def run_modeling():
             y_train,
             y_test,
         )
+
+        balanced_results.append(result)
 
     print("\n--- SMOTE Comparison ---")
 
@@ -263,6 +340,8 @@ def run_modeling():
         ),
     }
 
+    smote_results = []
+
     for name, model in smote_models.items():
         pipeline = ImbPipeline(
             [
@@ -272,7 +351,7 @@ def run_modeling():
             ]
         )
 
-        evaluate_classifier(
+        result = evaluate_classifier(
             name,
             pipeline,
             X_train,
@@ -281,9 +360,45 @@ def run_modeling():
             y_test,
         )
 
+        smote_results.append(result)
+
+    imbalance_results = balanced_results + smote_results
+
+    imbalance_table = pd.DataFrame(
+        [
+            {
+                "Method": (
+                    "Class Weight"
+                    if "Balanced" in result["name"]
+                    else "SMOTE"
+                ),
+                "Model": result["name"]
+                .replace(" Balanced", "")
+                .replace(" SMOTE", ""),
+                "Accuracy": result["accuracy"],
+                "Precision": result["precision"],
+                "Recall": result["recall"],
+                "F1": result["f1"],
+                "ROC_AUC": result["roc_auc"],
+            }
+            for result in imbalance_results
+        ]
+    )
+
+    print("\n--- Class Weight vs SMOTE Comparison ---")
     print(
-        "\nSMOTE was applied only to the training data "
-        "inside the pipeline."
+        imbalance_table.round(4).to_string(
+            index=False
+        )
+    )
+
+    imbalance_table.to_csv(
+        "analytics/imbalance_comparison.csv",
+        index=False,
+    )
+
+    print(
+        "\nSMOTE was applied only to the training data inside the pipeline."
     )
 
     print("\n--- Random Forest Grid Search ---")
@@ -394,26 +509,14 @@ def run_modeling():
     )
 
     print("\n--- Tuned Random Forest Test Performance ---")
-    print(
-        f"Accuracy: {tuned_accuracy:.4f}"
-    )
-    print(
-        f"Precision: {tuned_precision:.4f}"
-    )
-    print(
-        f"Recall: {tuned_recall:.4f}"
-    )
-    print(
-        f"F1 Score: {tuned_f1:.4f}"
-    )
-    print(
-        f"ROC AUC: {tuned_auc:.4f}"
-    )
+    print(f"Accuracy: {tuned_accuracy:.4f}")
+    print(f"Precision: {tuned_precision:.4f}")
+    print(f"Recall: {tuned_recall:.4f}")
+    print(f"F1 Score: {tuned_f1:.4f}")
+    print(f"ROC AUC: {tuned_auc:.4f}")
     print("Confusion Matrix:")
     print(tuned_matrix)
-    print(
-        f"OOB Score: {oob_score:.4f}"
-    )
+    print(f"OOB Score: {oob_score:.4f}")
 
     print("\n--- Regression: Predicting Fare ---")
 
@@ -496,9 +599,7 @@ def run_modeling():
     print(f"MAE: {mae:.2f}")
     print(f"RMSE: {rmse:.2f}")
     print(f"R2 Score: {r2:.4f}")
-    print(
-        f"Adjusted R2: {adjusted_r2:.4f}"
-    )
+    print(f"Adjusted R2: {adjusted_r2:.4f}")
 
     plt.figure(
         figsize=(10, 6)
@@ -531,8 +632,7 @@ def run_modeling():
     plt.close()
 
     print(
-        "\nResidual plot saved to "
-        "analytics/regression_residuals.png"
+        "\nResidual plot saved to analytics/regression_residuals.png"
     )
 
     absolute_residual_correlation = np.corrcoef(
@@ -543,8 +643,7 @@ def run_modeling():
     if abs(absolute_residual_correlation) >= 0.30:
         heteroscedasticity_statement = (
             "The residual spread changes with predicted fare, "
-            "which provides evidence consistent with "
-            "heteroscedasticity."
+            "which provides evidence consistent with heteroscedasticity."
         )
     else:
         heteroscedasticity_statement = (
@@ -553,18 +652,104 @@ def run_modeling():
             "between predicted fare and absolute residuals."
         )
 
-    print(
-        "\n--- Heteroscedasticity Assessment ---"
-    )
-
-    print(
-        heteroscedasticity_statement
-    )
+    print("\n--- Heteroscedasticity Assessment ---")
+    print(heteroscedasticity_statement)
 
     print(
         f"Correlation between predicted fare and "
         f"absolute residuals: "
         f"{absolute_residual_correlation:.4f}"
+    )
+
+    final_classification_table = baseline_table.copy()
+
+    tuned_row = pd.DataFrame(
+        [
+            {
+                "Model": "Tuned Random Forest",
+                "Accuracy": tuned_accuracy,
+                "Precision": tuned_precision,
+                "Recall": tuned_recall,
+                "F1": tuned_f1,
+                "ROC_AUC": tuned_auc,
+            }
+        ]
+    )
+
+    final_classification_table = pd.concat(
+        [
+            final_classification_table,
+            tuned_row,
+        ],
+        ignore_index=True,
+    )
+
+    final_regression_table = pd.DataFrame(
+        [
+            {
+                "Model": "Linear Regression",
+                "MAE": mae,
+                "RMSE": rmse,
+                "R2": r2,
+                "Adjusted_R2": adjusted_r2,
+            }
+        ]
+    )
+
+    final_classification_table.to_csv(
+        "analytics/final_classification_comparison.csv",
+        index=False,
+    )
+
+    final_regression_table.to_csv(
+        "analytics/final_regression_comparison.csv",
+        index=False,
+    )
+
+    print("\n--- Final Classification Comparison ---")
+    print(
+        final_classification_table.round(4).to_string(
+            index=False
+        )
+    )
+
+    print("\n--- Final Regression Comparison ---")
+    print(
+        final_regression_table.round(4).to_string(
+            index=False
+        )
+    )
+
+    best_baseline = baseline_table.loc[
+        baseline_table["F1"].idxmax()
+    ]
+
+    print("\n--- Final Model Summary ---")
+    print(
+        f"The baseline classifier with the highest F1 score was "
+        f"{best_baseline['Model']} with an F1 score of "
+        f"{best_baseline['F1']:.4f}."
+    )
+
+    print(
+        f"The tuned Random Forest achieved an F1 score of "
+        f"{tuned_f1:.4f} and ROC AUC of {tuned_auc:.4f}."
+    )
+
+    print(
+        f"The tuned Random Forest OOB score was "
+        f"{oob_score:.4f}, providing an additional internal "
+        f"validation measure."
+    )
+
+    print(
+        f"The Linear Regression model achieved an R2 score of "
+        f"{r2:.4f} with an RMSE of {rmse:.2f} for fare prediction."
+    )
+
+    print(
+        "The final results provide both classification performance "
+        "for survival prediction and regression performance for fare prediction."
     )
 
     joblib.dump(
@@ -614,9 +799,7 @@ def run_modeling():
         raw_input
     )[0, 1]
 
-    print(
-        "\n--- Saved Pipeline Reload Test ---"
-    )
+    print("\n--- Saved Pipeline Reload Test ---")
 
     print(
         f"Raw input prediction: "
@@ -633,9 +816,7 @@ def run_modeling():
         "prediction successful."
     )
 
-    print(
-        "\nModeling completed successfully."
-    )
+    print("\nModeling completed successfully.")
 
 
 if __name__ == "__main__":

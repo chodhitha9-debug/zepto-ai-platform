@@ -1,2 +1,3 @@
 Delivery Policy
-Standard delivery is free on orders of INR 500 or more. Orders under INR 500 incur a delivery fee of INR 49. Priority delivery is available for INR 25 and reserves the next available rider. Priority delivery can be selected at checkout and cannot be added to existing orders.
+
+Standard delivery is free for orders of INR 149 or more. Orders below INR 149 incur a delivery fee of INR 25. Priority delivery is available for INR 15 and reserves the next available rider. Priority delivery can be selected only at checkout and cannot be added to existing orders.

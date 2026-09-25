@@ -8,9 +8,11 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://books.toscrape.com/catalogue/page-{}.html"
 GBP_TO_INR = 105.50
+
 DB_PATH = "data_pipeline/books.db"
 RAW_CSV_PATH = "data_pipeline/books_raw.csv"
 CLEAN_CSV_PATH = "data_pipeline/books_clean.csv"
+SQL_RESULTS_PATH = "data_pipeline/sql_results.txt"
 
 RATING_MAP = {
     "One": 1,
@@ -23,6 +25,7 @@ RATING_MAP = {
 
 def create_session():
     session = requests.Session()
+
     session.headers.update(
         {
             "User-Agent": (
@@ -32,37 +35,49 @@ def create_session():
             )
         }
     )
+
     return session
 
 
 def scrape_book_details(session, detail_url):
-    response = session.get(detail_url, timeout=20)
+    response = session.get(
+        detail_url,
+        timeout=20
+    )
+
     response.raise_for_status()
 
     soup = BeautifulSoup(
         response.content,
-        "html.parser",
+        "html.parser"
     )
 
     title_tag = soup.find("h1")
+
     price_tag = soup.find(
         "p",
-        class_="price_color",
+        class_="price_color"
     )
+
     availability_tag = soup.find(
         "p",
-        class_="instock availability",
+        class_="instock availability"
     )
+
     rating_tag = soup.find(
         "p",
-        class_="star-rating",
+        class_="star-rating"
     )
 
     if title_tag is None:
-        raise ValueError("Book title could not be found.")
+        raise ValueError(
+            "Book title could not be found."
+        )
 
     if price_tag is None:
-        raise ValueError("Book price could not be found.")
+        raise ValueError(
+            "Book price could not be found."
+        )
 
     if availability_tag is None:
         raise ValueError(
@@ -84,12 +99,12 @@ def scrape_book_details(session, detail_url):
 
     availability = availability_tag.get_text(
         " ",
-        strip=True,
+        strip=True
     )
 
     rating_classes = rating_tag.get(
         "class",
-        [],
+        []
     )
 
     rating_word = next(
@@ -110,7 +125,7 @@ def scrape_book_details(session, detail_url):
 
     breadcrumb = soup.find(
         "ul",
-        class_="breadcrumb",
+        class_="breadcrumb"
     )
 
     if breadcrumb is not None:
@@ -140,19 +155,19 @@ def scrape_books():
 
         response = session.get(
             url,
-            timeout=20,
+            timeout=20
         )
 
         response.raise_for_status()
 
         soup = BeautifulSoup(
             response.content,
-            "html.parser",
+            "html.parser"
         )
 
         articles = soup.find_all(
             "article",
-            class_="product_pod",
+            class_="product_pod"
         )
 
         page_count = 0
@@ -175,16 +190,22 @@ def scrape_books():
 
             detail_url = urljoin(
                 url,
-                detail_link,
+                detail_link
             )
 
-            book = scrape_book_details(
-                session,
-                detail_url,
-            )
+            try:
+                book = scrape_book_details(
+                    session,
+                    detail_url
+                )
 
-            books.append(book)
-            page_count += 1
+                books.append(book)
+                page_count += 1
+
+            except Exception as error:
+                print(
+                    f"Skipping book: {error}"
+                )
 
         print(
             f"Page {page_number}: "
@@ -195,10 +216,14 @@ def scrape_books():
 
 
 def clean_price(value):
+    if pd.isna(value):
+        return None
+
     value = str(value).strip()
 
     value = (
-        value.replace("Â£", "")
+        value
+        .replace("Â£", "")
         .replace("£", "")
         .replace("&pound;", "")
         .replace("GBP", "")
@@ -206,7 +231,11 @@ def clean_price(value):
         .strip()
     )
 
-    return float(value)
+    try:
+        return float(value)
+
+    except ValueError:
+        return None
 
 
 def clean_data(df):
@@ -217,18 +246,43 @@ def clean_data(df):
         .apply(clean_price)
     )
 
+    price_median = clean_df[
+        "price_gbp"
+    ].median()
+
+    clean_df["price_gbp"] = (
+        clean_df["price_gbp"]
+        .fillna(price_median)
+    )
+
     clean_df["rating"] = (
         clean_df["star_rating"]
         .map(RATING_MAP)
+    )
+
+    rating_mode = clean_df[
+        "rating"
+    ].mode()[0]
+
+    clean_df["rating"] = (
+        clean_df["rating"]
+        .fillna(rating_mode)
         .astype(int)
+    )
+
+    clean_df["category"] = (
+        clean_df["category"]
+        .fillna("Unknown")
+        .replace("", "Unknown")
     )
 
     clean_df["in_stock"] = (
         clean_df["availability"]
+        .astype(str)
         .str.contains(
             "In stock",
             case=False,
-            na=False,
+            na=False
         )
     )
 
@@ -299,7 +353,9 @@ def validate_pipeline(df):
         - df["price_inr"]
     ).abs()
 
-    if not difference.lt(0.01).all():
+    if not difference.lt(
+        0.01
+    ).all():
         raise ValueError(
             "price_inr conversion is incorrect."
         )
@@ -321,7 +377,9 @@ def validate_pipeline(df):
             "Book categories cannot be missing."
         )
 
-    if (df["price_gbp"] <= 0).any():
+    if (
+        df["price_gbp"] <= 0
+    ).any():
         raise ValueError(
             "Book prices must be positive."
         )
@@ -454,6 +512,7 @@ def run_queries(connection):
                 rating
             FROM books
         """,
+
         "WHERE": """
             SELECT
                 title,
@@ -461,6 +520,7 @@ def run_queries(connection):
             FROM books
             WHERE price_gbp > 20
         """,
+
         "ORDER BY": """
             SELECT
                 title,
@@ -468,6 +528,7 @@ def run_queries(connection):
             FROM books
             ORDER BY price_gbp DESC
         """,
+
         "LIMIT": """
             SELECT
                 title,
@@ -476,12 +537,14 @@ def run_queries(connection):
             ORDER BY price_gbp DESC
             LIMIT 5
         """,
+
         "DISTINCT": """
             SELECT DISTINCT
                 rating
             FROM books
             ORDER BY rating
         """,
+
         "IN_BETWEEN": """
             SELECT
                 title,
@@ -491,6 +554,7 @@ def run_queries(connection):
             WHERE rating IN (4, 5)
               AND price_gbp BETWEEN 10 AND 30
         """,
+
         "JOIN": """
             SELECT
                 b.title,
@@ -502,6 +566,7 @@ def run_queries(connection):
                 ON b.category_id =
                    c.category_id
         """,
+
         "CATEGORY_COUNT": """
             SELECT
                 c.category_name,
@@ -515,20 +580,51 @@ def run_queries(connection):
         """,
     }
 
-    for name, query in queries.items():
-        result = pd.read_sql_query(
-            query,
-            connection,
-        )
+    with open(
+        SQL_RESULTS_PATH,
+        "w",
+        encoding="utf-8"
+    ) as file:
 
-        print()
-        print(
-            f"SQL QUERY: {name}"
-        )
-        print(
-            result.head(10)
-            .to_string(index=False)
-        )
+        for name, query in queries.items():
+
+            result = pd.read_sql_query(
+                query,
+                connection
+            )
+
+            print()
+            print(
+                f"SQL QUERY: {name}"
+            )
+
+            print(
+                result.head(10)
+                .to_string(index=False)
+            )
+
+            file.write(
+                f"\n{'=' * 60}\n"
+            )
+
+            file.write(
+                f"SQL QUERY: {name}\n"
+            )
+
+            file.write(
+                query.strip()
+            )
+
+            file.write(
+                "\n\nRESULT:\n"
+            )
+
+            file.write(
+                result.head(10)
+                .to_string(index=False)
+            )
+
+            file.write("\n")
 
 
 def pandas_equivalents(connection):
@@ -544,13 +640,14 @@ def pandas_equivalents(connection):
 
     top_books = pd.read_sql(
         top_books_query,
-        connection,
+        connection
     )
 
     print()
     print(
         "PANDAS read_sql RESULT:"
     )
+
     print(
         top_books.to_string(
             index=False
@@ -564,6 +661,11 @@ def pandas_equivalents(connection):
         FROM categories
     """
 
+    category_df = pd.read_sql(
+        category_query,
+        connection
+    )
+
     book_query = """
         SELECT
             book_id,
@@ -576,21 +678,16 @@ def pandas_equivalents(connection):
         FROM books
     """
 
-    category_df = pd.read_sql(
-        category_query,
-        connection,
-    )
-
     book_df = pd.read_sql(
         book_query,
-        connection,
+        connection
     )
 
     merged = pd.merge(
         book_df,
         category_df,
         on="category_id",
-        how="inner",
+        how="inner"
     )
 
     print()
@@ -671,11 +768,13 @@ def main():
     print(
         "Starting Books to Scrape pipeline..."
     )
+
     print()
 
     df = scrape_books()
 
     print()
+
     print(
         f"Scraped {len(df)} books."
     )
@@ -683,10 +782,14 @@ def main():
     df.to_csv(
         RAW_CSV_PATH,
         index=False,
-        encoding="utf-8",
+        encoding="utf-8"
     )
 
-    clean_df = clean_data(df)
+    clean_df = clean_data(
+        df
+    )
+
+    print()
 
     print(
         f"Cleaned dataset contains "
@@ -694,7 +797,11 @@ def main():
     )
 
     print()
-    print("Categories:")
+
+    print(
+        "Categories:"
+    )
+
     print(
         clean_df["category"]
         .value_counts()
@@ -704,10 +811,16 @@ def main():
         clean_df
     )
 
+    print()
+
+    print(
+        "Pipeline data validation passed."
+    )
+
     clean_df.to_csv(
         CLEAN_CSV_PATH,
         index=False,
-        encoding="utf-8",
+        encoding="utf-8"
     )
 
     connection = setup_database(
@@ -719,6 +832,7 @@ def main():
     )
 
     print()
+
     print(
         "Database validation passed."
     )
@@ -734,17 +848,25 @@ def main():
     connection.close()
 
     print()
+
     print(
         "Pipeline completed successfully."
     )
+
     print(
         f"Database: {DB_PATH}"
     )
+
     print(
         f"Raw CSV: {RAW_CSV_PATH}"
     )
+
     print(
         f"Clean CSV: {CLEAN_CSV_PATH}"
+    )
+
+    print(
+        f"SQL results: {SQL_RESULTS_PATH}"
     )
 
 
