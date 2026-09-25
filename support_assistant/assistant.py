@@ -1,6 +1,7 @@
 import os
 import glob
 from typing import TypedDict, List, Optional
+MOCK_LLM = os.getenv("MOCK_LLM", "1")
 from pydantic import BaseModel, Field
 from fastapi import FastAPI
 import uvicorn
@@ -27,6 +28,34 @@ class LocalEmbeddingFunction:
     def __call__(self, input: List[str]) -> List[List[float]]:
         return embedding_model.encode(input).tolist()
 
+    def embed_query(self, input: List[str]) -> List[List[float]]:
+        return embedding_model.encode(input).tolist()
+
+    @staticmethod
+    def name() -> str:
+        return "local_sentence_transformer"
+
+    def get_config(self):
+        return {
+            "model_name": "all-MiniLM-L6-v2"
+        }
+
+    @staticmethod
+    def build_from_config(config):
+        return LocalEmbeddingFunction()
+def chunk_text(text, chunk_size=500, overlap=50):
+    chunks = []
+
+    start = 0
+
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+
+        start = end - overlap
+
+    return chunks
+
 chroma_client = chromadb.PersistentClient(path=DB_DIR)
 collection = chroma_client.get_or_create_collection(
     name="zepto_policies",
@@ -35,18 +64,42 @@ collection = chroma_client.get_or_create_collection(
 
 def init_vector_store():
     if collection.count() == 0 and os.path.exists(DOCS_DIR):
-        doc_files = sorted(glob.glob(os.path.join(DOCS_DIR, "doc_*.txt")))
-        documents, ids, metadatas = [], [], []
+
+        doc_files = sorted(
+            glob.glob(os.path.join(DOCS_DIR, "doc_*.txt"))
+        )
+
+        documents = []
+        ids = []
+        metadatas = []
+
         for file_path in doc_files:
+
             doc_id = os.path.basename(file_path).replace(".txt", "")
+
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read().strip()
-            documents.append(text)
-            ids.append(doc_id)
-            metadatas.append({"source": doc_id})
-        if documents:
-            collection.add(documents=documents, ids=ids, metadatas=metadatas)
 
+            chunks = chunk_text(text)
+
+            for chunk_number, chunk in enumerate(chunks):
+
+                chunk_id = f"{doc_id}_chunk_{chunk_number}"
+
+                documents.append(chunk)
+                ids.append(chunk_id)
+
+                metadatas.append({
+                    "source": doc_id,
+                    "chunk_id": chunk_id
+                })
+
+        if documents:
+            collection.add(
+                documents=documents,
+                ids=ids,
+                metadatas=metadatas
+            )
 init_vector_store()
 
 # --- LangGraph Setup ---
@@ -65,6 +118,36 @@ def classify_intent(state: GraphState) -> GraphState:
     else:
         intent = "general_question"
     return {**state, "intent": intent}
+STRUCTURED_PROMPT = """
+Role:
+You are a Zepto customer support assistant.
+
+Context:
+Answer only using the policy information provided below.
+
+Task:
+Answer the user's question clearly and directly.
+
+Format:
+Return a short, helpful answer.
+
+Length:
+Keep the answer concise.
+
+Constraint:
+Do not answer using information that is not present in the provided context.
+
+Example:
+User: What is the delivery fee for orders under INR 500?
+Context: Orders under INR 500 have a delivery fee of INR 49.
+Answer: The delivery fee is INR 49 for orders under INR 500.
+
+User question:
+{query}
+
+Provided context:
+{context}
+"""
 
 def retrieve_and_answer(state: GraphState) -> GraphState:
     query = state["query"]
@@ -72,22 +155,54 @@ def retrieve_and_answer(state: GraphState) -> GraphState:
     retrieved_docs = results["documents"][0] if results["documents"] else []
     retrieved_ids = results["ids"][0] if results["ids"] else []
     
-    top_snippet = retrieved_docs[0][:200] if retrieved_docs else "No content retrieved."
-    canned_answer = f"Based on the retrieved context: {top_snippet}..."
+    context = "\n".join(retrieved_docs)
+
+    prompt = STRUCTURED_PROMPT.format(
+        query=query,
+        context=context
+    )
+
+    if MOCK_LLM == "1":
+        if retrieved_docs:
+        # Deterministic mock generation using the structured prompt
+            answer = (
+                "Based on the provided policy context: "
+                + retrieved_docs[0]
+            )
+        else:
+            answer = "No relevant policy information was found."
+    else:
+        answer = (
+            f"LLM mode is enabled. Prompt prepared for the real LLM:\n{prompt}"
+        )
     
     response = QueryResponse(
-        answer=canned_answer,
-        sources=retrieved_ids[:1],
-        confidence=1.0
+        answer=answer,
+        sources=retrieved_ids,
+        confidence=0.9 if retrieved_docs else 0.0
     )
-    return {**state, "retrieved_docs": retrieved_docs, "retrieved_ids": retrieved_ids, "final_response": response}
+    return {
+        **state, 
+        "retrieved_docs": retrieved_docs, 
+        "retrieved_ids": retrieved_ids, 
+        "final_response": response
+    }
 
 def direct_answer(state: GraphState) -> GraphState:
+    if MOCK_LLM == "1":
+        answer = "I can only answer questions about Zepto policies right now."
+    else:
+        answer = (
+            "LLM mode is enabled. A real LLM can be connected here "
+            "for general questions."
+        )
+
     response = QueryResponse(
-        answer="I can only answer questions about Zepto policies right now.",
+        answer=answer,
         sources=[],
         confidence=1.0
     )
+
     return {**state, "final_response": response}
 
 def route_intent(state: GraphState) -> str:
@@ -124,4 +239,4 @@ def ask_question(request: QueryRequest):
     return result["final_response"]
 
 if __name__ == "__main__":
-    uvicorn.run("assistant:app", host="0.0.0.0", port=7860, reload=True)-
+    uvicorn.run("assistant:app", host="0.0.0.0", port=7860, reload=True)

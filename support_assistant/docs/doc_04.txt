@@ -1,1 +1,3 @@
-Every Zepto order shows a live rider-tracking map from the moment it is packed until delivery, accessible from the 'Track Order' screen. Estimated delivery time updates automatically as the rider moves. If an order's status shows no movement for more than 20 minutes past its original estimated delivery time, customers should contact support directly rather than continue waiting, since this indicates a likely delivery issue.
+Order Tracking
+
+Every order gets live rider tracking from "Packed" through delivery. Updates happen automatically as the rider moves, and the estimated delivery time updates accordingly. If an order is more than 20 minutes past the original estimated delivery time, contact support through the Track Order screen.
